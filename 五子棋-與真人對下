@@ -1,0 +1,330 @@
+import os
+import pickle
+import random
+import math
+import numpy as np
+import copy
+
+class GomokuEnv:
+    def __init__(self, board_size=15):
+        self.board_size = board_size
+        self.board = np.zeros((board_size, board_size), dtype=int)
+        self.current_player = 1
+        self.winner = 0
+        self.done = False
+
+    def reset(self):
+        self.board = np.zeros((self.board_size, self.board_size), dtype=int)
+        self.current_player = 1
+        self.winner = 0
+        self.done = False
+        return self.board
+
+    def step(self, r, c):
+        if self.done: return False, self.done
+        if not (0 <= r < self.board_size and 0 <= c < self.board_size): return False, self.done
+        if self.board[r, c] != 0: return False, self.done
+
+        self.board[r, c] = self.current_player
+        if self._check_win(r, c, self.current_player):
+            self.winner = self.current_player
+            self.done = True
+        elif np.all(self.board != 0):
+            self.winner = 0
+            self.done = True
+        else:
+            self.current_player *= -1
+        return True, self.done
+
+    def _check_win(self, r, c, player):
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        for dr, dc in directions:
+            count = 1
+            nr, nc = r + dr, c + dc
+            while 0 <= nr < self.board_size and 0 <= nc < self.board_size and self.board[nr, nc] == player:
+                count += 1; nr += dr; nc += dc
+            nr, nc = r - dr, c - dc
+            while 0 <= nr < self.board_size and 0 <= nc < self.board_size and self.board[nr, nc] == player:
+                count += 1; nr -= dr; nc -= dc
+            if count >= 5: return True
+        return False
+
+class EvolvableAI:
+    def __init__(self, depth=2, weights=None):
+        self.depth = depth
+        self.weights = weights if weights else {}
+
+    def mutate(self):
+        new_weights = copy.deepcopy(self.weights)
+        if not new_weights: return EvolvableAI(depth=self.depth, weights=self.weights)
+        key_to_mutate = random.choice(list(new_weights.keys()))
+        if key_to_mutate == 'defense_multiplier':
+            new_weights[key_to_mutate] += random.uniform(-0.1, 0.1)
+            new_weights[key_to_mutate] = max(1.0, new_weights[key_to_mutate])
+        else:
+            change_factor = random.uniform(0.9, 1.1)
+            new_weights[key_to_mutate] = int(new_weights[key_to_mutate] * change_factor)
+        return EvolvableAI(depth=self.depth, weights=new_weights)
+
+    def get_candidate_moves(self, board):
+        size = board.shape[0]
+        candidates = set()
+        has_piece = False
+        for r in range(size):
+            for c in range(size):
+                if board[r, c] != 0:
+                    has_piece = True
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == 0:
+                                candidates.add((nr, nc))
+        if not has_piece: return [(size // 2, size // 2)]
+        return list(candidates)
+
+    def is_winning_move_at(self, board, r, c, player):
+        size = board.shape[0]
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        for dr, dc in directions:
+            count = 1
+            nr, nc = r + dr, c + dc
+            while 0 <= nr < size and 0 <= nc < size and board[nr, nc] == player:
+                count += 1; nr += dr; nc += dc
+            nr, nc = r - dr, c - dc
+            while 0 <= nr < size and 0 <= nc < size and board[nr, nc] == player:
+                count += 1; nr -= dr; nc -= dc
+            if count >= 5: return True
+        return False
+
+    def analyze_line_pattern(self, board, r, c, dr, dc, player):
+        size = board.shape[0]
+        count = 1
+        open_ends = 0
+        nr, nc = r + dr, c + dc
+        while 0 <= nr < size and 0 <= nc < size and board[nr, nc] == player:
+            count += 1; nr += dr; nc += dc
+        if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == 0: open_ends += 1
+
+        nr, nc = r - dr, c - dc
+        while 0 <= nr < size and 0 <= nc < size and board[nr, nc] == player:
+            count += 1; nr -= dr; nc -= dc
+        if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == 0: open_ends += 1
+        return count, open_ends
+
+    def is_dangerous_pattern_at(self, board, r, c, player):
+        size = board.shape[0]
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        for dr, dc in directions:
+            count, open_ends = self.analyze_line_pattern(board, r, c, dr, dc, player)
+            if count >= 4 or (count == 3 and open_ends >= 1):
+                return True
+        return False
+
+    def check_immediate_threat(self, board, player):
+        size = board.shape[0]
+        opponent = -player
+        for r in range(size):
+            for c in range(size):
+                if board[r, c] != 0: continue
+                board[r, c] = player
+                if self.is_winning_move_at(board, r, c, player):
+                    board[r, c] = 0; return (r, c)
+                board[r, c] = 0
+
+                board[r, c] = opponent
+                if self.is_winning_move_at(board, r, c, opponent):
+                    board[r, c] = 0; return (r, c)
+                board[r, c] = 0
+
+        for r in range(size):
+            for c in range(size):
+                if board[r, c] != 0: continue
+                board[r, c] = opponent
+                if self.is_dangerous_pattern_at(board, r, c, opponent):
+                    board[r, c] = 0; return (r, c)
+                board[r, c] = 0
+        return None
+
+    def evaluate_board(self, board, player):
+        score = 0
+        size = board.shape[0]
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        defense_mult = self.weights.get('defense_multiplier', 3.5)
+
+        for r in range(size):
+            for c in range(size):
+                curr_p = board[r, c]
+                if curr_p == 0: continue
+                multiplier = 1 if curr_p == player else -defense_mult
+
+                for dr, dc in directions:
+                    pr, pc = r - dr, c - dc
+                    if 0 <= pr < size and 0 <= pc < size and board[pr, pc] == curr_p:
+                        continue
+                    count, open_ends = self.analyze_line_pattern(board, r, c, dr, dc, curr_p)
+
+                    pattern_score = 0
+                    if count >= 5: pattern_score = self.weights.get('line_5', 1000000)
+                    elif count == 4:
+                        if open_ends == 2: pattern_score = self.weights.get('open_line_4', 100000)
+                        elif open_ends == 1: pattern_score = self.weights.get('closed_line_4', 10000)
+                    elif count == 3:
+                        if open_ends == 2: pattern_score = self.weights.get('open_line_3', 8000)
+                        elif open_ends == 1: pattern_score = self.weights.get('closed_line_3', 1000)
+                    elif count == 2 and open_ends == 2:
+                        pattern_score = self.weights.get('open_line_2', 500)
+
+                    score += pattern_score * multiplier
+        return score
+
+    def minimax(self, board, depth, alpha, beta, maximizing_player, current_eval_player):
+        if depth == 0:
+            return self.evaluate_board(board, current_eval_player), None
+
+        candidates = self.get_candidate_moves(board)
+        valid_candidates = [m for m in candidates if board[m[0], m[1]] == 0]
+        if not valid_candidates:
+            return self.evaluate_board(board, current_eval_player), None
+
+        best_move = valid_candidates[0]
+
+        if maximizing_player:
+            max_eval = -math.inf
+            for r, c in valid_candidates:
+                board[r, c] = current_eval_player
+                if self.is_winning_move_at(board, r, c, current_eval_player):
+                    board[r, c] = 0
+                    return 99999999, (r, c)
+
+                eval_score, _ = self.minimax(board, depth - 1, alpha, beta, False, current_eval_player)
+                board[r, c] = 0
+
+                if eval_score > max_eval:
+                    max_eval = eval_score
+                    best_move = (r, c)
+                alpha = max(alpha, eval_score)
+                if beta <= alpha: break
+            return max_eval, best_move
+        else:
+            min_eval = math.inf
+            for r, c in valid_candidates:
+                board[r, c] = -current_eval_player
+                if self.is_winning_move_at(board, r, c, -current_eval_player):
+                    board[r, c] = 0
+                    return -99999999, (r, c)
+
+                eval_score, _ = self.minimax(board, depth - 1, alpha, beta, True, current_eval_player)
+                board[r, c] = 0
+
+                if eval_score < min_eval:
+                    min_eval = eval_score
+                    best_move = (r, c)
+                beta = min(beta, eval_score)
+                if beta <= alpha: break
+            return min_eval, best_move
+
+    def get_best_move(self, board, player):
+        threat_move = self.check_immediate_threat(board, player)
+        if threat_move and board[threat_move[0], threat_move[1]] == 0:
+            return threat_move
+
+        _, best_move = self.minimax(board, depth=self.depth, alpha=-math.inf, beta=math.inf, maximizing_player=True, current_eval_player=player)
+        if best_move is None or board[best_move[0], best_move[1]] != 0:
+            size = board.shape[0]
+            empty_cells = [(r, c) for r in range(size) for c in range(size) if board[r, c] == 0]
+            if empty_cells: return random.choice(empty_cells)
+            return None
+        return best_move
+
+def board_to_symbols(board):
+    size = board.shape[0]
+    header = "   " + " ".join([f"{c:2d}" for c in range(size)])
+    lines = [header]
+    for r in range(size):
+        row_str = f"{r:2d} "
+        for c in range(size):
+            val = board[r, c]
+            if val == 1: row_str += " O "
+            elif val == -1: row_str += " X "
+            else: row_str += " . "
+        lines.append(row_str)
+    return "\n".join(lines)
+
+def play_against_ai():
+    if not os.path.exists("best_ai.pkl"):
+        print("❌ 找不到 best_ai.pkl 存檔！請先執行 train_and_core.py 產生 AI 存檔。")
+        return
+
+    print("正在載入訓練完成的AI...")
+    with open("best_ai.pkl", "rb") as f:
+        ai = pickle.load(f)
+
+    ai.depth = 2
+    print("載入成功！(已啟動權重 + Depth 2 深度思考 + 防呆攔截模式)\n")
+
+    env = GomokuEnv()
+    env.reset()
+
+    human_player = 1  # 真人黑子先手
+    ai_player = -1    # AI白子後手
+
+    print("=" * 50)
+    print(" 五子棋真人對戰模式 ( O: 真人黑子先手 | X: AI白子後手 )")
+    print("=" * 50 + "\n")
+    print(board_to_symbols(env.board))
+
+    while not env.done:
+        if env.current_player == human_player:
+            print(f"\n👉 輪到你了 [真人 O (黑)]")
+            move_str = input("請輸入落子座標 (格式如 7,7): ").strip()
+            try:
+                if ',' in move_str: r, c = map(int, move_str.split(','))
+                else: r, c = map(int, move_str.split())
+
+                success, done = env.step(r, c)
+                if not success:
+                    print("❌ 該位置已有棋子或超出範圍，請重新輸入！")
+                    continue
+            except Exception as e:
+                print(f"❌ 格式錯誤 ({e})，請重新輸入（例如：7,7）。")
+                continue
+        else:
+            print(f"\n🤖 AI 正在使用多棋型權重與 Minimax 深度思考...")
+            move = ai.get_best_move(env.board, ai_player)
+            if not move:
+                print("平手！")
+                break
+            r, c = move
+            env.step(r, c)
+            print(f"🤖 AI 下在了: ({r}, {c})")
+
+        print("\n目前棋盤狀態：")
+        print(board_to_symbols(env.board))
+
+    print("\n" + "=" * 40)
+    if env.winner == human_player:
+        print("🎉 恭喜你贏了！")
+    elif env.winner == ai_player:
+        print("🤖 AI 獲勝！")
+    else:
+        print("🤝 雙方平手！")
+    print("=" * 40)
+
+    # 線上學習與突變
+    print("\n[系統] 正在進行對戰後線上學習與突變...")
+    ai = ai.mutate()
+
+    with open("best_ai.pkl", "wb") as f:
+        pickle.dump(ai, f)
+
+    print("\n" + "="*45)
+    print("【線上學習完成！最新 AI 權重數值報告】")
+    print("="*45)
+    for k, v in ai.weights.items():
+        print(f"  - {k}: {v}")
+    print("="*45)
+    print("✨ AI 權重已更新並自動儲存至 best_ai.pkl！")
+
+if __name__ == "__main__":
+    play_against_ai()
+⋯⋯
